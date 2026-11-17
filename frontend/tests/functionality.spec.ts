@@ -607,6 +607,62 @@ test('分析看板模块：KPI卡片、运行分析、图表渲染', async ({ pa
   expect(browserErrors).toEqual([])
 })
 
+test('分析实验：阈值版本切换后显著性结论与当前阈值/基准区间一致', async ({ page }) => {
+  test.setTimeout(120_000)
+  const browserErrors: string[] = []
+  page.on('pageerror', e => browserErrors.push(e.message))
+  page.on('response', r => { if (r.url().includes('/api/') && r.status() >= 400) browserErrors.push(`${r.status()} ${r.url()}`) })
+
+  await page.goto('/experiment')
+  await expect(page.getByTestId('threshold-panel')).toBeVisible()
+  await expect(page.getByTestId('version-select').locator('option')).toHaveCount(2)
+
+  const judgementRows = page.getByTestId('judgement-table').locator('tbody tr')
+
+  // 默认按运行期生效版本（THV-V2，阈值 0.01）自动加载判定记录
+  await expect(judgementRows.first()).toBeVisible()
+  await expect(page.getByTestId('threshold-meta')).toContainText('THV-V2')
+  await expect(page.getByTestId('threshold-meta')).toContainText('0.01')
+  await expect(page.getByTestId('threshold-meta')).toContainText('[0.62, 0.78]')
+
+  // 同一条分组（EXPE-0001 分组3）在 V2 下不显著：p 值 0.0444 超出 0.01。
+  // 按业务键（方案编号 + 分组）定位，不依赖后端自增记录 id。
+  const rowV2 = judgementRows.filter({ hasText: 'EXPE-0001' }).filter({ hasText: '分组3' })
+  await expect(rowV2).toHaveCount(1)
+  await expect(rowV2).toHaveAttribute('data-significant', 'false')
+  await expect(rowV2).toContainText('不显著')
+
+  // 手动重算走 upsert，记录数不变、结论保持当前口径
+  const countBefore = await judgementRows.count()
+  await page.getByTestId('recalculate').click()
+  await expect(judgementRows).toHaveCount(countBefore)
+
+  // 切换到设计冻结版本（THV-V1，阈值 0.05、区间 [0.60, 0.75]），结论翻转
+  await page.getByTestId('scope-select').selectOption('设计冻结值')
+  await expect(page.getByTestId('threshold-meta')).toContainText('THV-V1')
+  await expect(page.getByTestId('threshold-meta')).toContainText('0.05')
+  const rowV1 = judgementRows.filter({ hasText: 'EXPE-0001' }).filter({ hasText: '分组3' })
+  await expect(rowV1).toHaveAttribute('data-significant', 'true')
+  await expect(rowV1).toContainText('显著')
+
+  // 详情保留阈值判定记录的判定条件与业务输入，不残留旧记录
+  await rowV1.getByRole('button', { name: '查看判定记录' }).click()
+  await expect(page.getByTestId('judgement-modal')).toBeVisible()
+  await expect(page.getByTestId('detail-判定条件')).toContainText('双侧两比例z检验')
+  await expect(page.getByTestId('detail-业务输入')).toContainText('显著阈值')
+  await expect(page.getByTestId('detail-版本编号')).toHaveText('THV-V1')
+
+  // 导出文件明确当前结论使用的阈值版本与基准区间
+  await page.getByTestId('judgement-modal').getByRole('button', { name: '关闭' }).click()
+  await expect(page.getByTestId('judgement-modal')).toHaveCount(0)
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByTestId('judgement-export').click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toBe('experiment_judgement.csv')
+
+  expect(browserErrors).toEqual([])
+})
+
 test('概览汇总', async ({ page }) => {
   test.setTimeout(300_000)
   await page.goto('/')
